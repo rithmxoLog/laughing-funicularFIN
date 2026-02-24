@@ -1,0 +1,481 @@
+AppDeployer Guide for .NET Applications
+A practical guide for deploying .NET applications to AppDeployer, based on real deployment experience.
+
+Quick Start
+# Install CLI
+npm install -g https://appdeployer.rithmxo.org/downloads/appdeployer-cli.tgz
+
+# Authenticate
+ad login
+
+# Initialize and deploy
+cd your-project
+ad init
+ad push
+.ad.json Configuration
+The .ad.json file configures your deployment. Here's a working template for .NET apps:
+
+{
+  "name": "your-app-name",
+  "framework": "dotnet",
+  "buildCommand": "dotnet publish path/to/YourApp.csproj -c Release -o ./publish",
+  "startCommand": "cd publish && ./YourApp"
+}
+Key Rules
+Field	Requirement
+buildCommand	Must specify full path to .csproj if not in root
+startCommand	Must match the executable name from the .csproj (usually AssemblyName or project name)
+Output folder	Use ./publish for consistency
+Common Mistake: Wrong Build Path
+Bad (fails if .csproj isn't in root):
+
+"buildCommand": "dotnet publish -c Release -o ."
+Good (explicit path):
+
+"buildCommand": "dotnet publish src/MyApp.Api/MyApp.Api.csproj -c Release -o ./publish"
+Required: APP_PORT Environment Variable
+AppDeployer assigns a dynamic port to your app. Your app must read from APP_PORT:
+
+// In Program.cs - at the end of the file
+var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
+app.Run($"http://*:{port}");
+Common Mistake: Hardcoded Port
+Bad:
+
+app.Run("http://*:5000");  // Won't work - AppDeployer assigns different port
+Bad:
+
+var port = Environment.GetEnvironmentVariable("APP_HTTP_PORT") ?? "5000";  // Wrong env var name
+Good:
+
+var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
+app.Run($"http://*:{port}");
+Required: Health Endpoints
+AppDeployer requires these three health endpoints, all returning HTTP 200:
+
+Endpoint	Purpose
+/health	Basic health check (required by AppDeployer)
+/health/live	Liveness probe
+/health/ready	Readiness probe
+Minimal Implementation
+[ApiController]
+[Route("health")]
+public class HealthController : ControllerBase
+{
+    [HttpGet]
+    public IActionResult Health()
+    {
+        return Ok(new { status = "Healthy", timestamp = DateTime.UtcNow });
+    }
+
+    [HttpGet("live")]
+    public IActionResult Live()
+    {
+        return Ok(new { status = "Healthy", timestamp = DateTime.UtcNow });
+    }
+
+    [HttpGet("ready")]
+    public IActionResult Ready()
+    {
+        // Add your readiness logic here (e.g., check database)
+        return Ok(new { status = "Healthy", timestamp = DateTime.UtcNow });
+    }
+}
+Common Mistake: Missing /health Endpoint
+Having only /health/live and /health/ready is not enough. You must also have /health (the base route).
+
+Database Migrations
+AppDeployer provisions a PostgreSQL database automatically. For EF Core migrations:
+
+Option 1: Migrate at Startup (Recommended)
+Add this to Program.cs after builder.Build():
+
+var app = builder.Build();
+
+// Apply pending migrations on startup
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<YourDbContext>();
+    db.Database.Migrate();
+}
+Option 2: migrateCommand (May Have Issues)
+{
+  "migrateCommand": "cd your-project && dotnet ef database update"
+}
+Note: The dotnet-ef tool may fail to install on some servers due to permission issues. Startup migrations are more reliable.
+
+Clearing migrateCommand
+If you previously set a migrateCommand and want to remove it, explicitly set it to empty:
+
+{
+  "migrateCommand": ""
+}
+Then run ad update to sync.
+
+CLI Commands Reference
+Deployment
+Command	Description
+ad push	Push and deploy to PreTest (prompts for message)
+ad push -m "msg"	Push with inline message
+ad push a	Quick push with "Updates" message
+ad push --force	Force push (overwrites remote)
+ad deploy -e pretest	Deploy to PreTest
+ad deploy -e test	Deploy to Test
+ad deploy -e prod	Deploy to Production
+ad deploy --latest -y	Auto-deploy latest without prompts
+Monitoring
+Command	Description
+ad status	Check app status
+ad logs	View deployment logs (defaults to test)
+ad logs -e pretest	View PreTest logs
+ad logs -e prod -n 200	View last 200 production log lines
+ad logs your-app-name	View logs for specific app
+Configuration
+Command	Description
+ad update	Sync .ad.json settings to server
+ad env set KEY=value	Set environment variable
+ad env set KEY=value -s	Set secret environment variable
+ad env list	List environment variables
+Database
+Command	Description
+ad db tables	List database tables
+ad db schema <table>	Show table schema
+ad db query "SQL"	Run read-only SQL query
+ad db connection	Show connection info
+Common Errors and Solutions
+1. "Specify a project or solution file"
+MSBUILD : error MSB1003: Specify a project or solution file.
+The current working directory does not contain a project or solution file.
+Cause: Build command doesn't specify path to .csproj
+
+Fix: Update buildCommand with explicit path:
+
+"buildCommand": "dotnet publish src/YourApp/YourApp.csproj -c Release -o ./publish"
+2. "Health endpoint not responding" / "Connection failed"
+Error: Health endpoint not responding after 30s. Last error: Connection failed
+Cause: App is listening on wrong port
+
+Fix: Use APP_PORT environment variable:
+
+var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
+app.Run($"http://*:{port}");
+3. "App does not have /health endpoint"
+Error: App does not have /health endpoint - root responded after 1s (HTTP 404)
+Cause: Missing /health endpoint (only has /health/live and /health/ready)
+
+Fix: Add [HttpGet] method to your HealthController:
+
+[HttpGet]
+public IActionResult Health()
+{
+    return Ok(new { status = "Healthy", timestamp = DateTime.UtcNow });
+}
+4. "relation does not exist"
+PostgresException: 42P01: relation "YourTable" does not exist
+Cause: Database migrations haven't been applied
+
+Fix: Add startup migrations in Program.cs:
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<YourDbContext>();
+    db.Database.Migrate();
+}
+5. PostgreSQL service failed to start
+Error: /bin/sh: 1: /usr/lib/postgresql/16/bin/initdb: not found
+Cause: PostgreSQL 16 not installed on deployment server
+
+Fix: This is an infrastructure issue. Contact the AppDeployer team to install PostgreSQL 16:
+
+sudo apt install postgresql-16
+6. "Commit not found" / Git sync issues
+Error: Commit abc123 not found
+Cause: Git push didn't fully sync to server
+
+Fix: Force push and redeploy:
+
+ad push --force -m "your message"
+ad deploy --latest -y -e pretest
+7. Migration command keeps running despite being removed
+Cause: Server caches old settings
+
+Fix: Explicitly set empty string and update:
+
+{
+  "migrateCommand": ""
+}
+ad update
+ad deploy --latest -y -e pretest
+Environment URLs
+Environment	URL Pattern
+PreTest	your-app-pretest.rithm.services
+Test	your-app-test.rithm.services
+Production	your-app.rithmxo.org
+Auto-Injected Environment Variables
+AppDeployer automatically provides these:
+
+Variable	Description
+APP_NAME	Application name
+APP_PORT	Port to listen on (required!)
+PGHOST	PostgreSQL host
+PGDATABASE	PostgreSQL database name
+ConnectionStrings__DefaultConnection	Full EF Core connection string
+Complete Working Example
+.ad.json
+{
+  "name": "my-api",
+  "framework": "dotnet",
+  "buildCommand": "dotnet publish src/MyApi/MyApi.csproj -c Release -o ./publish",
+  "startCommand": "cd publish && ./MyApi"
+}
+Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+builder.Services.AddDbContext<MyDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+var app = builder.Build();
+
+// Apply migrations at startup
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<MyDbContext>();
+    db.Database.Migrate();
+}
+
+app.MapControllers();
+
+// Use AppDeployer's assigned port
+var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
+app.Run($"http://*:{port}");
+HealthController.cs
+[ApiController]
+[Route("health")]
+public class HealthController : ControllerBase
+{
+    [HttpGet]
+    public IActionResult Health() => Ok(new { status = "Healthy" });
+
+    [HttpGet("live")]
+    public IActionResult Live() => Ok(new { status = "Healthy" });
+
+    [HttpGet("ready")]
+    public IActionResult Ready() => Ok(new { status = "Healthy" });
+}
+Deployment Checklist
+Before deploying, verify:
+
+[ ] .ad.json has correct path to .csproj in buildCommand
+[ ] startCommand matches your executable name
+[ ] Program.cs uses APP_PORT environment variable
+[ ] /health, /health/live, and /health/ready endpoints exist and return 200
+[ ] Database migrations run at startup (if using EF Core)
+[ ] All code is committed to git
+Then deploy:
+
+ad push -m "Your commit message"
+ad logs -e pretest  # Watch deployment progress
+
+
+# Health Check System
+
+AppDeployer has a multi-layered health monitoring system that continuously monitors the platform itself, deployed applications, and infrastructure servers.
+
+## API Endpoints
+
+| Endpoint | Auth | Purpose |
+|----------|------|---------|
+| `GET /api/health` | Anonymous | Basic health (database + memory) |
+| `GET /api/health/ready` | Anonymous | Readiness probe (database connectable) |
+| `GET /api/health/live` | Anonymous | Liveness probe (process alive) |
+| `GET /api/health/detailed` | JWT | Full report (database + memory + uptime) |
+| `GET /api/health/dashboard` | JWT | Infrastructure dashboard (servers, apps, issues, alerts) |
+
+### Health Statuses
+
+- **Healthy** (200) — All checks pass
+- **Degraded** (200) — Warnings present (e.g., memory > 1024MB)
+- **Unhealthy** (503) — Critical failure (e.g., database unreachable)
+
+## Dashboard Endpoint
+
+`GET /api/health/dashboard` is the primary monitoring interface used by the Admin Health tab. It returns:
+
+### AppDeployer Service Health
+- **Database connectivity** — Executes `SELECT 1` against PostgreSQL
+- **Memory usage** — Current process memory in MB (flags Degraded > 1024MB)
+- **Uptime** — Hours since process start
+
+### Server Connectivity
+- **TCP port 22 test** for every registered server (2-second timeout)
+- Runs in parallel across all servers
+- Marks each server as online/offline
+- Aggregated into environment-level status (PreTest, Test, Production)
+
+### Application Status
+- Counts per environment: running, stopped, failed, crash loop
+- Environment status derived from server availability + app health
+
+### Issues Detection
+- Apps with **CrashLoop** status
+- Apps with **Failed** status
+- Apps with **> 10 restarts** (flagged as HighRestarts)
+
+### Active Alerts
+- Last 20 unacknowledged `ServiceAlert` records
+
+## Background Monitoring Services
+
+### Process Monitor (every 30 seconds)
+
+**File:** `src/AppDeployer.Infrastructure/Services/ProcessMonitoringBackgroundService.cs`
+
+Continuously monitors all deployed applications across all environments.
+
+#### Per-App Checks
+
+1. **systemd status** — Queries `ActiveState`, `SubState`, PID via systemctl
+2. **Resource metrics** — CPU usage (%), memory usage (bytes) from systemd cgroup data
+3. **Restart count** — Reads `NRestarts` from systemd
+4. **HTTP health check** (primary) — `GET http://127.0.0.1:{port}/health` on the remote server
+   - 5-second timeout
+   - Accepts 2xx (healthy) or 401 (auth required, app is running)
+   - App is only marked "Running" if BOTH systemd is active AND HTTP check passes
+5. **Public domain check** (secondary, informational) — `GET https://{domain}/health`
+   - Does NOT affect Running status
+   - Logs warnings for DNS propagation or nginx issues
+
+#### Crash Loop Detection
+
+- Compares restart count delta between 30-second monitoring cycles
+- **Threshold:** >= 5 restarts in 30 seconds
+- **Auto-remediation when detected:**
+  1. Captures last 50 journal log lines
+  2. Stops and disables the systemd service
+  3. Stops associated PostgreSQL service
+  4. Updates app status to `CrashLoop`
+  5. Creates `ServiceAlert` record with logs and remediation details
+  6. Broadcasts alert via SignalR to connected dashboard clients
+
+#### Other Checks
+
+- **Orphaned status fix** — Apps marked "Running" with no `ProcessInfo` record get corrected to "Stopped"
+- **Nginx recovery** — If nginx is down but config is valid, auto-restarts it
+
+### Nginx Health Check (every 12 hours)
+
+**File:** `src/AppDeployer.Infrastructure/Services/NginxHealthCheckBackgroundService.cs`
+
+Periodic nginx infrastructure verification.
+
+#### What It Checks
+
+- **Nginx service status** — Is the nginx process running?
+- **Config syntax validation** — `nginx -t`
+- **Per-app config verification:**
+  - `missing` — Config file doesn't exist for a deployed app
+  - `disabled` — Site config exists but not enabled
+  - `cert_missing` — SSL certificate file not found
+  - `ssl_mismatch` — Certificate exists but config only has HTTP
+  - `duplicate` / `orphaned` — Conflicting or stale configs
+  - `duplicate_domain` — Multiple configs for the same domain
+
+#### Auto-Fix (optional, disabled by default)
+
+```
+AppDeployer:NginxHealthCheck:Enabled: true
+AppDeployer:NginxHealthCheck:AutoFix: false
+```
+
+When enabled, auto-fix will:
+- Clean up conflicting configs (duplicates/orphaned)
+- Provision missing SSL certificates via Certbot
+- Regenerate nginx configs for affected apps
+- Reload nginx after fixes
+
+## Deployment Health Checks
+
+During cluster deployments, two additional health checks run:
+
+### Per-Node Check (Step 6)
+
+After deploying to each node, validates the app started correctly:
+- `GET http://{nodeHost}:{healthPort}/health`
+- Uses backend port for dual-server apps (`backendPort ?? port`)
+- **6 retries**, 5 seconds apart (30 seconds total startup window)
+- Checks response content for "Unhealthy" string even on 200 OK
+- Failure on any node aborts that node's deployment
+
+### Cluster Validation (Step 8)
+
+After all nodes deployed and nginx configured, validates the full cluster:
+- Health checks all `AppInstance` records for the app/environment
+- Uses `instance.BackendPort ?? instance.Port` for dual-server apps
+- All instances must be healthy for the deployment to succeed
+- **Failure triggers automatic rollback** — stops all instances across the cluster
+
+**File:** `src/AppDeployer.Infrastructure/Services/ClusterDeploymentService.cs`
+
+## Data Model
+
+### ProcessInfo
+
+Tracks per-app runtime metrics in each environment:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SystemdStatus` | string | e.g., "active/running", "inactive/dead" |
+| `CpuUsagePercent` | double? | Current CPU usage |
+| `MemoryUsageBytes` | long? | Current memory usage |
+| `RestartCount` | int | Total systemd restarts |
+| `LastRestartedAt` | DateTime? | When last restarted |
+| `LastHealthCheck` | DateTime | When last checked |
+| `Pid` | int? | Current process ID |
+| `Port` | int | Listening port |
+
+### ServiceAlert
+
+Created when crash loop is detected:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `AlertType` | string | "CrashLoop" |
+| `RestartCountAtDetection` | int | Total restarts when detected |
+| `RestartDelta` | int | Restarts in the 30-second window |
+| `RemediationAction` | string | "StopAndDisable" |
+| `RemediationSucceeded` | bool | Whether auto-stop worked |
+| `SystemdLogs` | string? | Last 50 journal lines (max 10KB) |
+| `IsActive` | bool | False after acknowledged |
+
+## Real-time Alerts (SignalR)
+
+Crash loop alerts are broadcast to connected dashboard clients via SignalR:
+
+```json
+{
+  "AlertId": "guid",
+  "AppId": "guid",
+  "AppName": "service-name",
+  "Environment": "Test",
+  "Message": "Service stopped after 5 restarts in 30s...",
+  "RestartDelta": 5,
+  "DetectedAt": "2026-02-23T...",
+  "RemediationSucceeded": true
+}
+```
+
+The Admin Health tab receives these in real-time without requiring a page refresh.
+
+## Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Process monitor interval | 30 seconds | Hardcoded |
+| Crash loop threshold | 5 restarts/30s | Hardcoded |
+| Nginx health interval | 12 hours | `AppDeployer:NginxHealthCheck:IntervalMinutes` |
+| Nginx auto-fix | Disabled | `AppDeployer:NginxHealthCheck:AutoFix` |
+| Deployment health retries | 6 attempts | Hardcoded (5s apart = 30s window) |
+| Deployment health timeout | 10 seconds | Per-attempt HTTP timeout |
+| Server TCP check timeout | 2 seconds | Dashboard server connectivity |
+| Memory degraded threshold | 1024 MB | Hardcoded |
