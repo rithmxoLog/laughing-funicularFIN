@@ -1,21 +1,20 @@
 # collect_md_sh.py
-# Searches all folders/subfolders for .md and .sh files and consolidates their content into a single .txt file
+# Searches the script's directory and all subfolders for .md and .sh files and consolidates their content into a single .txt file
 
 import os
-import sys
 import time
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 output_file = os.path.join(script_dir, "collected_files.txt")
 
 print()
-print("  Scanning C:\\ for .md and .sh files...")
-print("  Please wait, this may take a while...")
+print(f"  Scanning {script_dir} for .md and .sh files...")
+print("  Please wait...")
 print()
 
 # Collect all .md and .sh files
 files = []
-for root, dirs, filenames in os.walk("C:\\"):
+for root, dirs, filenames in os.walk(script_dir):
     for name in filenames:
         if name.lower().endswith((".md", ".sh")):
             full_path = os.path.join(root, name)
@@ -48,6 +47,7 @@ with open(output_file, "w", encoding="utf-8") as out:
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
+            content = "".join(ch for ch in content if ch in "\n\r\t" or (ord(ch) >= 32 and ord(ch) != 127))
             out.write(content)
         except Exception as e:
             errors += 1
