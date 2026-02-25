@@ -1,1331 +1,12 @@
-# TemplateXO Developer Guide
+# AppDeployer Guide for .NET Applications
 
-> **Version:** 1.0 | **Updated:** 2026-02-19 | **Target:** .NET 8
-
-This guide covers everything you need to know to build applications using the TemplateXO castle template.
-
----
-
-## Table of Contents
-
-1. [What Is This Template?](#1-what-is-this-template)
-2. [Quick Start (5 Minutes)](#2-quick-start-5-minutes)
-3. [Project Structure](#3-project-structure)
-4. [Configuration](#4-configuration)
-5. [Adding Features](#5-adding-features)
-6. [Multi-Tenancy](#6-multi-tenancy)
-7. [Database & Migrations](#7-database--migrations)
-8. [API Development](#8-api-development)
-9. [The Module System](#9-the-module-system)
-10. [Security](#10-security)
-11. [Observability](#11-observability)
-12. [Service-to-Service Communication](#12-service-to-service-communication)
-13. [gRPC Services](#13-grpc-services)
-14. [Testing](#14-testing)
-15. [Deployment](#15-deployment)
-16. [Troubleshooting](#16-troubleshooting)
-
----
-
-## 1. What Is This Template?
-
-TemplateXO is the **canonical starting point** for all rithmXO applications ("castles"). It provides:
-
-| Feature | What It Does | You Need To |
-|---------|--------------|-------------|
-| **Multi-tenancy** | Automatic tenant isolation via PostgreSQL RLS | Inherit from `TenantEntity` |
-| **Authentication** | JWT validation with revocation checking | Provide JWT key |
-| **Rate Limiting** | Per-tenant token bucket (100 req/s default) | Nothing (automatic) |
-| **Security Headers** | HSTS, X-Frame-Options, CSP, etc. | Nothing (automatic) |
-| **Circuit Breakers** | Resilience for outbound calls | Nothing (automatic) |
-| **Observability** | Prometheus metrics, structured logging, tracing | Nothing (automatic) |
-| **Health Checks** | `/health/live` and `/health/ready` | Nothing (automatic) |
-| **CQRS Pattern** | MediatR-based commands and queries | Write handlers |
-| **Soft Deletes** | Logical deletion with audit trail | Implement `ISoftDeletable` |
-| **Audit Fields** | CreatedAt, UpdatedAt, CreatedBy, UpdatedBy | Nothing (automatic) |
-
-### What You DON'T Have To Do
-
-- Configure middleware pipelines
-- Set up authentication/authorization plumbing
-- Implement rate limiting
-- Write health check logic
-- Configure logging infrastructure
-- Handle tenant context propagation
-- Manage circuit breakers
-
-**The template handles all of this. You focus on business logic.**
-
----
-
-## 2. Quick Start (5 Minutes)
-
-### Prerequisites
-
-- .NET 8 SDK
-- PostgreSQL database
-- Valkey/Redis instance
-
-### Step 1: Clone and Rename
-
-```bash
-git clone <template-repo> my-castle
-cd my-castle
-# Rename "RithmTemplate" → "MyCastle" in project files
-```
-
-### Step 2: Configure (Only 4 Required Settings)
-
-Edit `backend/src/RithmTemplateApi/appsettings.json`:
-
-```json
-{
-  "Castle": {
-    "Id": "my-castle"
-  },
-  "ConnectionStrings": {
-    "DefaultContext": "Host=localhost;Database=mycastle;Username=dev;Password=dev",
-    "ValkeyConnection": "localhost:6379"
-  },
-  "Jwt": {
-    "Key": "your-secret-key-minimum-32-characters-long"
-  }
-}
-```
-
-**That's it.** Everything else has working defaults.
-
-### Step 3: Run
-
-```bash
-cd backend/src/RithmTemplateApi
-dotnet run
-```
-
-### Step 4: Verify
-
-```bash
-curl http://localhost:5000/health/ready
-```
-
-If you see `{"status":"Healthy"...}`, you're good to go.
-
----
-
-## 3. Project Structure
-
-```
-backend/
-├── src/
-│   ├── RithmTemplateApi/              # Your application entry point
-│   │   ├── Controllers/               # HTTP endpoints (thin controllers)
-│   │   ├── Middleware/                # HTTP pipeline (mostly pre-configured)
-│   │   ├── Features/                  # Your feature code goes here
-│   │   ├── Program.cs                 # Application startup (don't modify much)
-│   │   └── appsettings.json           # Configuration
-│   │
-│   ├── RithmTemplate.Application/     # Business logic layer
-│   │   ├── Features/                  # CQRS handlers, validators
-│   │   └── Common/                    # Shared abstractions
-│   │
-│   ├── RithmTemplate.DAL/             # Data access layer
-│   │   ├── Entities/                  # Domain entities
-│   │   ├── Persistence/               # EF Core DbContext
-│   │   └── Migrations/                # Database migrations
-│   │
-│   ├── Rithm.Platform.*/              # Platform modules (don't modify)
-│   │   ├── Rithm.Platform.Core/       # Core abstractions
-│   │   ├── Rithm.Platform.Tenancy/    # Multi-tenancy
-│   │   ├── Rithm.Platform.Security.*/ # Security modules
-│   │   └── Rithm.Platform.Observability/ # Logging, metrics
-│   │
-│   └── Rithm.Infrastructure.*/        # Infrastructure modules
-│       ├── Rithm.Infrastructure.Valkey/       # Redis/Valkey
-│       ├── Rithm.Infrastructure.ServiceRouter/ # HTTP clients
-│       ├── Rithm.Infrastructure.SignalR/      # Real-time
-│       └── Rithm.Infrastructure.gRPC/         # gRPC support
-│
-└── tests/
-    ├── RithmTemplate.UnitTests/       # Unit tests
-    └── RithmTemplate.TestUtils/       # Test helpers
-```
-
-### Where Your Code Goes
-
-| What | Where |
-|------|-------|
-| API endpoints | `RithmTemplateApi/Controllers/` or `RithmTemplateApi/Features/` |
-| Business logic | `RithmTemplate.Application/Features/` |
-| Domain entities | `RithmTemplate.DAL/Entities/` |
-| Database migrations | `RithmTemplate.DAL/Migrations/` |
-| Unit tests | `RithmTemplate.UnitTests/` |
-
-### What You Should NOT Modify
-
-- `Rithm.Platform.*` projects (platform modules)
-- `Rithm.Infrastructure.*` projects (infrastructure modules)
-- `Program.cs` middleware order (unless you know what you're doing)
-
----
-
-## 4. Configuration
-
-### Required Settings (4)
-
-| Setting | Purpose | Example |
-|---------|---------|---------|
-| `Castle:Id` | Identifies your service | `"order-service"` |
-| `ConnectionStrings:DefaultContext` | PostgreSQL connection | `"Host=localhost;Database=..."` |
-| `ConnectionStrings:ValkeyConnection` | Redis/Valkey connection | `"localhost:6379"` |
-| `Jwt:Key` | JWT signing key (32+ chars) | `"your-secret-key..."` |
-
-### Optional Settings (with defaults)
-
-#### CORS (needed for browser access)
-
-```json
-"Cors": {
-  "AllowedOrigins": ["https://myapp.example.com"],
-  "AllowedMethods": ["GET", "POST", "PUT", "DELETE", "PATCH"],
-  "AllowCredentials": true
-}
-```
-
-#### JWT (defaults work for development)
-
-```json
-"Jwt": {
-  "Key": "...",
-  "Issuer": "RithmTemplate",
-  "Audience": "RithmTemplateUsers",
-  "ExpirationMinutes": 60
-}
-```
-
-#### Rate Limiting
-
-```json
-"ValkeyOperational": {
-  "RateLimit": {
-    "Enabled": true,
-    "DefaultTokensPerSecond": 100.0,
-    "DefaultBurstCapacity": 200.0
-  }
-}
-```
-
-#### Security Headers
-
-```json
-"SecurityHeaders": {
-  "Enabled": true,
-  "EnableInDevelopment": false,
-  "HstsValue": "max-age=31536000; includeSubDomains",
-  "FrameOptions": "DENY"
-}
-```
-
-### Environment Variables
-
-Any setting can be overridden with environment variables:
-
-```bash
-# Using double underscores for nesting
-ConnectionStrings__DefaultContext="Host=prod-db;..."
-Castle__Id="order-service"
-Jwt__Key="production-secret-key"
-```
-
----
-
-## 5. Adding Features
-
-### The CQRS Pattern
-
-This template uses **CQRS (Command Query Responsibility Segregation)** via MediatR:
-
-- **Commands** = actions that change state (Create, Update, Delete)
-- **Queries** = actions that read state (Get, List, Search)
-
-### Example: Adding an "Orders" Feature
-
-#### Step 1: Create the Entity
-
-`RithmTemplate.DAL/Entities/Order.cs`:
-
-```csharp
-using Rithm.Platform.Tenancy;
-
-namespace RithmTemplate.DAL.Entities;
-
-public class Order : TenantEntity  // MUST inherit from TenantEntity
-{
-    public required string OrderNumber { get; set; }
-    public decimal Total { get; set; }
-    public OrderStatus Status { get; set; } = OrderStatus.Pending;
-    public DateTime? CompletedAt { get; set; }
-}
-
-public enum OrderStatus
-{
-    Pending,
-    Processing,
-    Completed,
-    Cancelled
-}
-```
-
-#### Step 2: Add to DbContext
-
-`RithmTemplate.DAL/Persistence/RithmTemplateDbContext.cs`:
-
-```csharp
-public DbSet<Order> Orders => Set<Order>();
-```
-
-#### Step 3: Create Migration
-
-```bash
-cd backend/src/RithmTemplateApi
-
-dotnet ef migrations add AddOrders \
-  --project ../RithmTemplate.DAL \
-  --startup-project .
-
-dotnet ef database update \
-  --project ../RithmTemplate.DAL \
-  --startup-project .
-```
-
-In your migration, **enable RLS**:
-
-```csharp
-protected override void Up(MigrationBuilder migrationBuilder)
-{
-    migrationBuilder.CreateTable(
-        name: "orders",
-        columns: table => new
-        {
-            id = table.Column<Guid>(nullable: false),
-            tenant_id = table.Column<Guid>(nullable: false),
-            order_number = table.Column<string>(nullable: false),
-            total = table.Column<decimal>(nullable: false),
-            status = table.Column<int>(nullable: false),
-            // ... audit fields
-        },
-        constraints: table =>
-        {
-            table.PrimaryKey("pk_orders", x => x.id);
-        });
-
-    // ONE LINE FOR RLS!
-    migrationBuilder.EnableRls("orders");
-}
-```
-
-#### Step 4: Create Command Handler
-
-`RithmTemplate.Application/Features/Orders/CreateOrder/CreateOrderCommand.cs`:
-
-```csharp
-using RithmTemplate.Application.Common.Abstractions;
-
-namespace RithmTemplate.Application.Features.Orders.CreateOrder;
-
-public record CreateOrderCommand(
-    string OrderNumber,
-    decimal Total
-) : ICommand<Guid>;
-```
-
-`RithmTemplate.Application/Features/Orders/CreateOrder/CreateOrderHandler.cs`:
-
-```csharp
-using RithmTemplate.Application.Common.Abstractions;
-using RithmTemplate.DAL.Entities;
-using RithmTemplate.DAL.Persistence;
-
-namespace RithmTemplate.Application.Features.Orders.CreateOrder;
-
-public class CreateOrderHandler : ICommandHandler<CreateOrderCommand, Guid>
-{
-    private readonly RithmTemplateDbContext _db;
-
-    public CreateOrderHandler(RithmTemplateDbContext db)
-    {
-        _db = db;
-    }
-
-    public async Task<Guid> Handle(CreateOrderCommand command, CancellationToken ct)
-    {
-        var order = new Order
-        {
-            OrderNumber = command.OrderNumber,
-            Total = command.Total
-        };
-
-        // TenantId is set automatically by TenantConnectionInterceptor
-        _db.Orders.Add(order);
-        await _db.SaveChangesAsync(ct);
-
-        return order.Id;
-    }
-}
-```
-
-#### Step 5: Create Validator
-
-`RithmTemplate.Application/Features/Orders/CreateOrder/CreateOrderValidator.cs`:
-
-```csharp
-using FluentValidation;
-
-namespace RithmTemplate.Application.Features.Orders.CreateOrder;
-
-public class CreateOrderValidator : AbstractValidator<CreateOrderCommand>
-{
-    public CreateOrderValidator()
-    {
-        RuleFor(x => x.OrderNumber)
-            .NotEmpty()
-            .MaximumLength(50);
-
-        RuleFor(x => x.Total)
-            .GreaterThan(0);
-    }
-}
-```
-
-#### Step 6: Create Controller
-
-`RithmTemplateApi/Controllers/OrdersController.cs`:
-
-```csharp
-using MediatR;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using RithmTemplate.Application.Features.Orders.CreateOrder;
-
-namespace RithmTemplateApi.Controllers;
-
-[ApiController]
-[Route("api/[controller]")]
-[Authorize]
-public class OrdersController : ControllerBase
-{
-    private readonly IMediator _mediator;
-
-    public OrdersController(IMediator mediator)
-    {
-        _mediator = mediator;
-    }
-
-    [HttpPost]
-    public async Task<ActionResult<Guid>> Create(CreateOrderCommand command)
-    {
-        var orderId = await _mediator.Send(command);
-        return CreatedAtAction(nameof(GetById), new { id = orderId }, orderId);
-    }
-
-    [HttpGet("{id:guid}")]
-    public async Task<ActionResult<OrderDto>> GetById(Guid id)
-    {
-        var order = await _mediator.Send(new GetOrderQuery(id));
-        return order is null ? NotFound() : Ok(order);
-    }
-}
-```
-
----
-
-## 6. Multi-Tenancy
-
-### How It Works
-
-1. **Tenant ID comes from the request** (header or JWT claim)
-2. **Middleware extracts it** and sets `ITenantContext`
-3. **Database interceptor** sets PostgreSQL session variable
-4. **RLS policies** filter all queries automatically
-
-### The Golden Rule
-
-> **Every entity that stores tenant data MUST inherit from `TenantEntity`**
-
-```csharp
-// CORRECT - Tenant-scoped entity
-public class Order : TenantEntity
-{
-    public string OrderNumber { get; set; }
-}
-
-// WRONG - No tenant isolation!
-public class Order : BaseEntity
-{
-    public string OrderNumber { get; set; }
-}
-```
-
-### How Tenant ID Is Resolved
-
-The middleware checks in this order:
-
-1. `X-Tenant-ID` header (for service-to-service calls)
-2. `tenant_id` claim in JWT (for user requests)
-
-If neither is present, the request is rejected.
-
-### Querying Data
-
-You don't need to filter by tenant - RLS does it automatically:
-
-```csharp
-// This ONLY returns orders for the current tenant
-var orders = await _db.Orders.ToListAsync();
-
-// This works too - RLS still applies
-var order = await _db.Orders.FindAsync(orderId);
-```
-
-### Cross-Tenant Access (Admin Only)
-
-If you need to bypass RLS (rare, be careful):
-
-```csharp
-var allOrders = await _db.Orders
-    .IgnoreQueryFilters()
-    .ToListAsync();
-```
-
----
-
-## 7. Database & Migrations
-
-### Creating Migrations
-
-```bash
-cd backend/src/RithmTemplateApi
-
-dotnet ef migrations add MigrationName \
-  --project ../RithmTemplate.DAL \
-  --startup-project .
-```
-
-### Applying Migrations
-
-```bash
-dotnet ef database update \
-  --project ../RithmTemplate.DAL \
-  --startup-project .
-```
-
-### Enabling RLS on Tables
-
-In every migration that creates a tenant-scoped table:
-
-```csharp
-protected override void Up(MigrationBuilder migrationBuilder)
-{
-    migrationBuilder.CreateTable(...);
-
-    // Add this line!
-    migrationBuilder.EnableRls("table_name");
-}
-
-protected override void Down(MigrationBuilder migrationBuilder)
-{
-    migrationBuilder.DisableRls("table_name");
-    migrationBuilder.DropTable("table_name");
-}
-```
-
-### Soft Deletes
-
-To enable soft deletes on an entity:
-
-```csharp
-public class Order : TenantEntity, ISoftDeletable
-{
-    public bool IsDeleted { get; set; }
-    public DateTime? DeletedAt { get; set; }
-    public string? DeletedBy { get; set; }
-}
-```
-
-Soft-deleted entities are automatically excluded from queries.
-
----
-
-## 8. API Development
-
-### Request/Response DTOs
-
-Create DTOs for API contracts (don't expose entities directly):
-
-```csharp
-// Request
-public record CreateOrderRequest(string OrderNumber, decimal Total);
-
-// Response
-public record OrderResponse(Guid Id, string OrderNumber, decimal Total, string Status);
-```
-
-### Validation
-
-Use FluentValidation for all input:
-
-```csharp
-public class CreateOrderValidator : AbstractValidator<CreateOrderCommand>
-{
-    public CreateOrderValidator()
-    {
-        RuleFor(x => x.OrderNumber).NotEmpty().MaximumLength(50);
-        RuleFor(x => x.Total).GreaterThan(0);
-    }
-}
-```
-
-Validation runs automatically via MediatR pipeline behavior.
-
-### Error Responses
-
-The template uses RFC 7807 Problem Details:
-
-```json
-{
-  "type": "https://tools.ietf.org/html/rfc7807",
-  "title": "Validation Failed",
-  "status": 400,
-  "detail": "One or more validation errors occurred.",
-  "errors": {
-    "OrderNumber": ["Order number is required."]
-  },
-  "traceId": "00-abc123..."
-}
-```
-
-### Idempotency
-
-For POST/PUT operations, clients can include `Idempotency-Key` header:
-
-```bash
-curl -X POST /api/orders \
-  -H "Idempotency-Key: unique-request-id" \
-  -d '{"orderNumber": "ORD-001", "total": 99.99}'
-```
-
-If the same key is sent again within 24 hours, the original response is returned.
-
----
-
-## 9. The Module System
-
-### What Are Modules?
-
-The template uses a modular architecture where features can be enabled/disabled via configuration.
-
-### Viewing Enabled Modules
-
-On startup, you'll see:
-
-```
-═══════════════════════════════════════════════════════════
-📦 RITHM MODULES - Configuration Summary
-═══════════════════════════════════════════════════════════
-🏗️  FOUNDATION (Required Base):
-    ✅ Core.Tenancy
-    ✅ Core.Observability
-    ✅ Core.Valkey
-🔗 INTER-SERVICE:
-    ✅ Infrastructure.gRPC
-    ✅ Infrastructure.ServiceRouter
-```
-
-### Disabling a Module
-
-In `appsettings.json`:
-
-```json
-"RithmModules": {
-  "Infrastructure": {
-    "gRPC": {
-      "Enabled": false
-    },
-    "SignalR": {
-      "Enabled": false
-    }
-  }
-}
-```
-
-### Module Categories
-
-| Category | Purpose | Can Disable? |
-|----------|---------|--------------|
-| Foundation | Core platform features | No |
-| Security | Authentication, authorization | Some |
-| InterService | Service-to-service communication | Yes |
-| Optional | Nice-to-have features | Yes |
-
----
-
-## 10. Security
-
-### Authentication
-
-JWT tokens are validated automatically. Required claims:
-
-- `sub` - Subject (user ID)
-- `tenant_id` - Tenant ID (or use X-Tenant-ID header)
-- `jti` - JWT ID (for revocation checking)
-
-### Token Revocation
-
-Tokens can be revoked via Valkey pub/sub. The template:
-
-1. Maintains a local cache of revoked tokens
-2. Subscribes to `token:revoked` channel
-3. Checks revocation on every request (O(1) local lookup)
-
-### Rate Limiting
-
-Per-tenant rate limiting is automatic:
-
-- Default: 100 requests/second per tenant
-- Burst: 200 requests allowed
-- Response: 429 Too Many Requests with `Retry-After` header
-
-### Security Headers
-
-All responses include:
-
-- `Strict-Transport-Security`
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- `X-XSS-Protection: 1; mode=block`
-- `Referrer-Policy: strict-origin-when-cross-origin`
-
-### CORS
-
-Configure allowed origins:
-
-```json
-"Cors": {
-  "AllowedOrigins": [
-    "https://myapp.example.com",
-    "https://admin.example.com"
-  ]
-}
-```
-
----
-
-## 11. Observability
-
-### Endpoints
-
-| Endpoint | Purpose |
-|----------|---------|
-| `/health/live` | Liveness probe (always 200 if process running) |
-| `/health/ready` | Readiness probe (checks dependencies) |
-| `/metrics` | Prometheus metrics |
-| `/.well-known/openapi.json` | OpenAPI specification |
-| `/swagger` | Swagger UI (development only) |
-
-### Logging
-
-Structured JSON logging with automatic fields:
-
-```json
-{
-  "timestamp": "2026-02-19T10:30:00Z",
-  "level": "Information",
-  "message": "Order created",
-  "tenant_id": "abc-123",
-  "request_id": "def-456",
-  "trace_id": "00-xyz..."
-}
-```
-
-PII is automatically redacted (emails, phone numbers, etc.).
-
-### Metrics
-
-Available at `/metrics` in Prometheus format:
-
-- `http_requests_total` - Request count by endpoint, status
-- `http_request_duration_seconds` - Request latency histogram
-- `http_requests_in_flight` - Current concurrent requests
-- `db_client_connection_count` - Database pool usage
-
-### Distributed Tracing
-
-OpenTelemetry is configured. Set the OTLP endpoint:
-
-```json
-"OpenTelemetry": {
-  "Enabled": true,
-  "ServiceName": "my-castle",
-  "OtlpExporterEndpoint": "http://collector:4317"
-}
-```
-
----
-
-## 12. Service-to-Service Communication
-
-### The ServiceRouter
-
-Use `IServiceRouter` to call other castles:
-
-```csharp
-public class MyService
-{
-    private readonly IServiceRouter _router;
-
-    public async Task<UserDto> GetUser(Guid userId)
-    {
-        return await _router.GetAsync<UserDto>(
-            "UserService",
-            $"/api/users/{userId}");
-    }
-}
-```
-
-### Automatic Header Propagation
-
-When calling other services, these headers are automatically included:
-
-- `Authorization` - Forwarded from inbound request
-- `X-Tenant-ID` - Current tenant
-- `X-Request-ID` - Request correlation
-- `X-Source-Castle` - Your castle ID (for billing)
-
-### Circuit Breakers
-
-Outbound calls have automatic circuit breakers:
-
-- Opens after 50% failure rate (minimum 5 requests)
-- Stays open for 30 seconds
-- Half-open: allows 3 test requests
-
-### Configure Service URLs
-
-```json
-"ServiceRouter": {
-  "UserServiceUrl": "http://user-service:5000",
-  "OrderServiceUrl": "http://order-service:5000"
-}
-```
-
----
-
-## 13. gRPC Services
-
-### Enabling gRPC
-
-gRPC is enabled by default. To disable:
-
-```json
-"RithmModules": {
-  "Infrastructure": {
-    "gRPC": { "Enabled": false }
-  }
-}
-```
-
-### Adding a gRPC Service
-
-#### Step 1: Create Proto File
-
-`Protos/orders.proto`:
-
-```protobuf
-syntax = "proto3";
-
-option csharp_namespace = "MyCastle.Grpc";
-
-package orders;
-
-service OrderService {
-  rpc GetOrder (GetOrderRequest) returns (OrderResponse);
-  rpc CreateOrder (CreateOrderRequest) returns (CreateOrderResponse);
-}
-
-message GetOrderRequest {
-  string id = 1;
-}
-
-message OrderResponse {
-  string id = 1;
-  string order_number = 2;
-  double total = 3;
-}
-
-message CreateOrderRequest {
-  string order_number = 1;
-  double total = 2;
-}
-
-message CreateOrderResponse {
-  string id = 1;
-}
-```
-
-#### Step 2: Add Proto to Project
-
-In `RithmTemplateApi.csproj`:
-
-```xml
-<ItemGroup>
-  <Protobuf Include="Protos\orders.proto" GrpcServices="Server" />
-</ItemGroup>
-
-<ItemGroup>
-  <PackageReference Include="Grpc.Tools" Version="2.62.0" PrivateAssets="All" />
-  <PackageReference Include="Google.Protobuf" Version="3.26.0" />
-</ItemGroup>
-```
-
-#### Step 3: Implement Service
-
-```csharp
-public class OrderGrpcService : OrderService.OrderServiceBase
-{
-    private readonly IMediator _mediator;
-
-    public override async Task<OrderResponse> GetOrder(
-        GetOrderRequest request,
-        ServerCallContext context)
-    {
-        var order = await _mediator.Send(new GetOrderQuery(Guid.Parse(request.Id)));
-        return new OrderResponse
-        {
-            Id = order.Id.ToString(),
-            OrderNumber = order.OrderNumber,
-            Total = (double)order.Total
-        };
-    }
-}
-```
-
-#### Step 4: Map Service
-
-In `Program.cs`, find the gRPC section:
-
-```csharp
-if (moduleBuilder.IsModuleEnabled("Infrastructure.gRPC"))
-{
-    app.MapGrpcService<OrderGrpcService>();  // Add this
-    app.MapRithmGrpcInfrastructure();
-}
-```
-
-### gRPC Ports
-
-- HTTP/REST: Port 5000 (default)
-- gRPC: Port 5001 (default)
-
-Configure via environment:
-
-```bash
-APP_HTTP_PORT=5000
-APP_GRPC_PORT=5001
-```
-
----
-
-## 14. Testing
-
-### Running Tests
-
-```bash
-cd backend
-dotnet test
-```
-
-### Test Utilities
-
-The template includes test helpers in `RithmTemplate.TestUtils`:
-
-```csharp
-// Create a test DbContext with in-memory database
-var db = TestDbContextFactory.Create();
-
-// Use builders for test data
-var order = new OrderBuilder()
-    .WithOrderNumber("TEST-001")
-    .WithTotal(99.99m)
-    .Build();
-
-// Use fakers for random data
-var orders = OrderFaker.Generate(10);
-```
-
-### Testing Handlers
-
-```csharp
-public class CreateOrderHandlerTests
-{
-    [Fact]
-    public async Task Handle_ValidCommand_CreatesOrder()
-    {
-        // Arrange
-        var db = TestDbContextFactory.Create();
-        var handler = new CreateOrderHandler(db);
-        var command = new CreateOrderCommand("ORD-001", 99.99m);
-
-        // Act
-        var orderId = await handler.Handle(command, CancellationToken.None);
-
-        // Assert
-        var order = await db.Orders.FindAsync(orderId);
-        Assert.NotNull(order);
-        Assert.Equal("ORD-001", order.OrderNumber);
-    }
-}
-```
-
----
-
-## 15. Deployment
-
-### systemd (Production)
-
-RithmXO uses systemd for deployment (not Docker/Kubernetes):
-
-```bash
-# Install service
-sudo cp deployment/systemd/my-castle.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable my-castle
-sudo systemctl start my-castle
-
-# Check status
-sudo systemctl status my-castle
-sudo journalctl -u my-castle -f
-```
-
-### Environment Variables (Production)
-
-Set in systemd service file or `/etc/systemd/system/my-castle.service.d/override.conf`:
-
-```ini
-[Service]
-Environment=ASPNETCORE_ENVIRONMENT=Production
-Environment=Castle__Id=my-castle
-Environment=ConnectionStrings__DefaultContext=Host=prod-db;...
-Environment=Jwt__Key=production-secret-key
-```
-
-### Health Check Integration
-
-Configure your load balancer/orchestrator:
-
-- **Liveness**: `GET /health/live` (expect 200)
-- **Readiness**: `GET /health/ready` (expect 200, or 503 if dependencies down)
-
----
-
-## 16. Troubleshooting
-
-### Startup Fails: "Missing required configuration"
-
-```
-════════════════════════════════════════════════════════════════
-  CASTLE STARTUP FAILED: Missing required configuration
-════════════════════════════════════════════════════════════════
-
-  ✗ Castle:Id - Your castle's unique identifier
-  ✗ ConnectionStrings:DefaultContext - PostgreSQL connection string
-```
-
-**Fix:** Set the missing values in `appsettings.json` or environment variables.
-
-### 401 Unauthorized
-
-- Check that you're sending `Authorization: Bearer <token>` header
-- Verify `Jwt:Key`, `Jwt:Issuer`, `Jwt:Audience` match your token issuer
-- Check if the token has been revoked
-
-### 403 Forbidden / Tenant Errors
-
-- Ensure `X-Tenant-ID` header is set, OR
-- Ensure your JWT contains a `tenant_id` claim
-- Check that the tenant exists and is active
-
-### Database Connection Refused
-
-- Verify PostgreSQL is running
-- Check connection string format: `Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass`
-- Ensure firewall allows connection
-
-### Rate Limited (429)
-
-- Default: 100 requests/second per tenant
-- Wait for `Retry-After` seconds
-- Or increase limit in config: `ValkeyOperational:RateLimit:DefaultTokensPerSecond`
-
-### Entity Not Filtered by Tenant
-
-- Ensure entity inherits from `TenantEntity`
-- Ensure migration includes `migrationBuilder.EnableRls("table_name")`
-- Check that RLS policy exists in database
-
-### gRPC Endpoints Not Working
-
-- Ensure gRPC module is enabled in config
-- Check you're using the gRPC port (5001 by default)
-- Verify HTTP/2 is supported by your client
-
----
-
-## Appendix: Configuration Reference
-
-See `appsettings.Minimal.json` for required settings only.
-
-See `appsettings.json` for all available options with documentation.
-
----
-
-## Getting Help
-
-- Check existing READMEs in each module folder
-- Review the `docs/` folder for specific guides
-- Ask in the team Slack channel
-
----
-
-*This guide is maintained as part of TemplateXO. Last updated: 2026-02-19*
-
-
-# Castle Quickstart (5 minutes)
-
-## Prerequisites
-- .NET 8 SDK
-- PostgreSQL database
-- Valkey/Redis instance
-
-## 1. Clone and Rename
-
-```bash
-git clone <template-repo> my-castle
-cd my-castle
-# Rename RithmTemplate → MyCastle in project files
-```
-
-## 2. Configure (Only 4 Required Settings)
-
-Edit `backend/src/RithmTemplateApi/appsettings.json`:
-
-```json
-{
-  "Castle": {
-    "Id": "my-castle"              // Your castle's unique name
-  },
-  "ConnectionStrings": {
-    "DefaultContext": "Host=localhost;Database=mycastle;Username=dev;Password=dev",
-    "ValkeyConnection": "localhost:6379"
-  },
-  "Jwt": {
-    "Key": "your-secret-key-minimum-32-characters-long"
-  }
-}
-```
-
-**Everything else has working defaults.**
-
-> **Note:** If your app is accessed from a browser, also set `Cors:AllowedOrigins`:
-> ```json
-> "Cors": {
->   "AllowedOrigins": ["https://myapp.example.com"]
-> }
-> ```
-
-## 3. Run
-
-```bash
-cd backend/src/RithmTemplateApi
-dotnet run
-```
-
-## 4. Verify
-
-```bash
-# Health check
-curl http://localhost:5000/health/ready
-
-# Metrics (Prometheus format)
-curl http://localhost:5000/metrics
-
-# OpenAPI spec
-curl http://localhost:5000/.well-known/openapi.json
-```
-
----
-
-## What You Get Automatically
-
-| Feature | Description |
-|---------|-------------|
-| **Multi-tenancy** | RLS enforcement at database level |
-| **JWT Authentication** | Token validation with revocation checking |
-| **Rate Limiting** | Per-tenant token bucket (100 req/s default) |
-| **Circuit Breakers** | Automatic resilience for outbound calls |
-| **Structured Logging** | JSON logs with PII redaction |
-| **Prometheus Metrics** | Available at `/metrics` |
-| **OpenAPI Spec** | Available at `/.well-known/openapi.json` |
-| **Health Checks** | `/health/live` and `/health/ready` |
-| **Soft Deletes** | Automatic on entities implementing `ISoftDeletable` |
-| **Audit Trails** | `CreatedAt`, `UpdatedAt`, `CreatedBy`, `UpdatedBy` on all entities |
-| **N/S vs E/W Detection** | Automatic billing stream separation |
-| **Token Revocation** | Local cache + Valkey pub/sub |
-| **Security Headers** | HSTS, X-Frame-Options, CSP, etc. |
-
----
-
-## Next Steps
-
-### Create Entities
-
-All tenant-scoped entities must inherit from `TenantEntity`:
-
-```csharp
-public class Order : TenantEntity
-{
-    public required string OrderNumber { get; set; }
-    public decimal Total { get; set; }
-    // TenantId is inherited and required
-}
-```
-
-### Add Database Migration
-
-```bash
-cd backend/src/RithmTemplateApi
-dotnet ef migrations add AddOrders
-dotnet ef database update
-```
-
-In your migration, enable RLS:
-
-```csharp
-protected override void Up(MigrationBuilder migrationBuilder)
-{
-    migrationBuilder.CreateTable(...);
-    migrationBuilder.EnableRls("orders");  // One line for RLS!
-}
-```
-
-### Add Features (CQRS Pattern)
-
-Create a new feature folder:
-
-```
-Features/
-└── Orders/
-    ├── CreateOrder/
-    │   ├── CreateOrderCommand.cs
-    │   ├── CreateOrderHandler.cs
-    │   └── CreateOrderValidator.cs
-    ├── GetOrder/
-    │   ├── GetOrderQuery.cs
-    │   └── GetOrderHandler.cs
-    └── OrdersController.cs
-```
-
-Example command:
-
-```csharp
-public record CreateOrderCommand(string OrderNumber, decimal Total) : ICommand<Guid>;
-
-public class CreateOrderHandler : ICommandHandler<CreateOrderCommand, Guid>
-{
-    private readonly RithmTemplateDbContext _db;
-
-    public async Task<Guid> Handle(CreateOrderCommand cmd, CancellationToken ct)
-    {
-        var order = new Order
-        {
-            OrderNumber = cmd.OrderNumber,
-            Total = cmd.Total
-        };
-
-        _db.Orders.Add(order);
-        await _db.SaveChangesAsync(ct);
-
-        return order.Id;
-    }
-}
-```
-
-### Add gRPC Services (Optional)
-
-If gRPC module is enabled, add proto files and services:
-
-```protobuf
-// Protos/orders.proto
-syntax = "proto3";
-option csharp_namespace = "MyCastle.Grpc";
-
-service OrderService {
-  rpc GetOrder (GetOrderRequest) returns (OrderResponse);
-}
-```
-
-Map in Program.cs:
-
-```csharp
-if (moduleBuilder.IsModuleEnabled("Infrastructure.gRPC"))
-{
-    app.MapGrpcService<OrderGrpcService>();
-    app.MapRithmGrpcInfrastructure();
-}
-```
-
----
-
-## Configuration Reference
-
-See `appsettings.Minimal.json` for a template of required settings.
-
-See `appsettings.json` for all available options with documentation.
-
----
-
-## Troubleshooting
-
-### "CASTLE STARTUP FAILED: Missing required configuration"
-
-The app validates required settings on startup. Check the error message for which settings are missing.
-
-### "Connection refused" to PostgreSQL/Valkey
-
-Ensure the services are running and the connection strings are correct:
-- PostgreSQL default: `Host=localhost;Port=5432;Database=...`
-- Valkey default: `localhost:6379`
-
-### "401 Unauthorized" on API calls
-
-- Ensure you're passing a valid JWT in the `Authorization: Bearer <token>` header
-- Check that `Jwt:Key`, `Jwt:Issuer`, and `Jwt:Audience` match your token issuer
-
-### "403 Forbidden" / Tenant errors
-
-- Ensure `X-Tenant-ID` header is set, OR
-- Ensure your JWT contains a `tenant_id` claim
-
----
-
-## Architecture Documentation
-
-See `docs/ARCHITECTURE.md` for detailed patterns and conventions.
-
-
-
-AppDeployer Guide for .NET Applications
 A practical guide for deploying .NET applications to AppDeployer, based on real deployment experience.
 
-Quick Start
+---
+
+## Quick Start
+
+```bash
 # Install CLI
 npm install -g https://appdeployer.rithmxo.org/downloads/appdeployer-cli.tgz
 
@@ -1336,52 +17,88 @@ ad login
 cd your-project
 ad init
 ad push
-.ad.json Configuration
-The .ad.json file configures your deployment. Here's a working template for .NET apps:
+```
 
+---
+
+## .ad.json Configuration
+
+The `.ad.json` file configures your deployment. Here's a working template for .NET apps:
+
+```json
 {
   "name": "your-app-name",
   "framework": "dotnet",
   "buildCommand": "dotnet publish path/to/YourApp.csproj -c Release -o ./publish",
   "startCommand": "cd publish && ./YourApp"
 }
-Key Rules
-Field	Requirement
-buildCommand	Must specify full path to .csproj if not in root
-startCommand	Must match the executable name from the .csproj (usually AssemblyName or project name)
-Output folder	Use ./publish for consistency
-Common Mistake: Wrong Build Path
-Bad (fails if .csproj isn't in root):
+```
 
+### Key Rules
+
+| Field | Requirement |
+|-------|-------------|
+| `buildCommand` | Must specify full path to `.csproj` if not in root |
+| `startCommand` | Must match the executable name from the `.csproj` (usually `AssemblyName` or project name) |
+| Output folder | Use `./publish` for consistency |
+
+### Common Mistake: Wrong Build Path
+
+**Bad** (fails if .csproj isn't in root):
+```json
 "buildCommand": "dotnet publish -c Release -o ."
-Good (explicit path):
+```
 
+**Good** (explicit path):
+```json
 "buildCommand": "dotnet publish src/MyApp.Api/MyApp.Api.csproj -c Release -o ./publish"
-Required: APP_PORT Environment Variable
-AppDeployer assigns a dynamic port to your app. Your app must read from APP_PORT:
+```
 
+---
+
+## Required: APP_PORT Environment Variable
+
+AppDeployer assigns a dynamic port to your app. Your app **must** read from `APP_PORT`:
+
+```csharp
 // In Program.cs - at the end of the file
 var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
 app.Run($"http://*:{port}");
-Common Mistake: Hardcoded Port
-Bad:
+```
 
+### Common Mistake: Hardcoded Port
+
+**Bad**:
+```csharp
 app.Run("http://*:5000");  // Won't work - AppDeployer assigns different port
-Bad:
+```
 
+**Bad**:
+```csharp
 var port = Environment.GetEnvironmentVariable("APP_HTTP_PORT") ?? "5000";  // Wrong env var name
-Good:
+```
 
+**Good**:
+```csharp
 var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
 app.Run($"http://*:{port}");
-Required: Health Endpoints
+```
+
+---
+
+## Required: Health Endpoints
+
 AppDeployer requires these three health endpoints, all returning HTTP 200:
 
-Endpoint	Purpose
-/health	Basic health check (required by AppDeployer)
-/health/live	Liveness probe
-/health/ready	Readiness probe
-Minimal Implementation
+| Endpoint | Purpose |
+|----------|---------|
+| `/health` | Basic health check (required by AppDeployer) |
+| `/health/live` | Liveness probe |
+| `/health/ready` | Readiness probe |
+
+### Minimal Implementation
+
+```csharp
 [ApiController]
 [Route("health")]
 public class HealthController : ControllerBase
@@ -1405,15 +122,23 @@ public class HealthController : ControllerBase
         return Ok(new { status = "Healthy", timestamp = DateTime.UtcNow });
     }
 }
-Common Mistake: Missing /health Endpoint
-Having only /health/live and /health/ready is not enough. You must also have /health (the base route).
+```
 
-Database Migrations
+### Common Mistake: Missing `/health` Endpoint
+
+Having only `/health/live` and `/health/ready` is **not enough**. You must also have `/health` (the base route).
+
+---
+
+## Database Migrations
+
 AppDeployer provisions a PostgreSQL database automatically. For EF Core migrations:
 
-Option 1: Migrate at Startup (Recommended)
-Add this to Program.cs after builder.Build():
+### Option 1: Migrate at Startup (Recommended)
 
+Add this to `Program.cs` after `builder.Build()`:
+
+```csharp
 var app = builder.Build();
 
 // Apply pending migrations on startup
@@ -1422,137 +147,235 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<YourDbContext>();
     db.Database.Migrate();
 }
-Option 2: migrateCommand (May Have Issues)
+```
+
+### Option 2: migrateCommand (May Have Issues)
+
+```json
 {
   "migrateCommand": "cd your-project && dotnet ef database update"
 }
-Note: The dotnet-ef tool may fail to install on some servers due to permission issues. Startup migrations are more reliable.
+```
 
-Clearing migrateCommand
-If you previously set a migrateCommand and want to remove it, explicitly set it to empty:
+**Note**: The `dotnet-ef` tool may fail to install on some servers due to permission issues. Startup migrations are more reliable.
 
+### Clearing migrateCommand
+
+If you previously set a `migrateCommand` and want to remove it, explicitly set it to empty:
+
+```json
 {
   "migrateCommand": ""
 }
-Then run ad update to sync.
+```
 
-CLI Commands Reference
-Deployment
-Command	Description
-ad push	Push and deploy to PreTest (prompts for message)
-ad push -m "msg"	Push with inline message
-ad push a	Quick push with "Updates" message
-ad push --force	Force push (overwrites remote)
-ad deploy -e pretest	Deploy to PreTest
-ad deploy -e test	Deploy to Test
-ad deploy -e prod	Deploy to Production
-ad deploy --latest -y	Auto-deploy latest without prompts
-Monitoring
-Command	Description
-ad status	Check app status
-ad logs	View deployment logs (defaults to test)
-ad logs -e pretest	View PreTest logs
-ad logs -e prod -n 200	View last 200 production log lines
-ad logs your-app-name	View logs for specific app
-Configuration
-Command	Description
-ad update	Sync .ad.json settings to server
-ad env set KEY=value	Set environment variable
-ad env set KEY=value -s	Set secret environment variable
-ad env list	List environment variables
-Database
-Command	Description
-ad db tables	List database tables
-ad db schema <table>	Show table schema
-ad db query "SQL"	Run read-only SQL query
-ad db connection	Show connection info
-Common Errors and Solutions
-1. "Specify a project or solution file"
+Then run `ad update` to sync.
+
+---
+
+## CLI Commands Reference
+
+### Deployment
+
+| Command | Description |
+|---------|-------------|
+| `ad push` | Push and deploy to PreTest (prompts for message) |
+| `ad push -m "msg"` | Push with inline message |
+| `ad push a` | Quick push with "Updates" message |
+| `ad push --force` | Force push (overwrites remote) |
+| `ad deploy -e pretest` | Deploy to PreTest |
+| `ad deploy -e test` | Deploy to Test |
+| `ad deploy -e prod` | Deploy to Production |
+| `ad deploy --latest -y` | Auto-deploy latest without prompts |
+
+### Monitoring
+
+| Command | Description |
+|---------|-------------|
+| `ad status` | Check app status |
+| `ad logs` | View deployment logs (defaults to test) |
+| `ad logs -e pretest` | View PreTest logs |
+| `ad logs -e prod -n 200` | View last 200 production log lines |
+| `ad logs your-app-name` | View logs for specific app |
+
+### Configuration
+
+| Command | Description |
+|---------|-------------|
+| `ad update` | Sync `.ad.json` settings to server |
+| `ad env set KEY=value` | Set environment variable |
+| `ad env set KEY=value -s` | Set secret environment variable |
+| `ad env list` | List environment variables |
+
+### Database
+
+| Command | Description |
+|---------|-------------|
+| `ad db tables` | List database tables |
+| `ad db schema <table>` | Show table schema |
+| `ad db query "SQL"` | Run read-only SQL query |
+| `ad db connection` | Show connection info |
+
+---
+
+## Common Errors and Solutions
+
+### 1. "Specify a project or solution file"
+
+```
 MSBUILD : error MSB1003: Specify a project or solution file.
 The current working directory does not contain a project or solution file.
-Cause: Build command doesn't specify path to .csproj
+```
 
-Fix: Update buildCommand with explicit path:
+**Cause**: Build command doesn't specify path to `.csproj`
 
+**Fix**: Update `buildCommand` with explicit path:
+```json
 "buildCommand": "dotnet publish src/YourApp/YourApp.csproj -c Release -o ./publish"
-2. "Health endpoint not responding" / "Connection failed"
+```
+
+---
+
+### 2. "Health endpoint not responding" / "Connection failed"
+
+```
 Error: Health endpoint not responding after 30s. Last error: Connection failed
-Cause: App is listening on wrong port
+```
 
-Fix: Use APP_PORT environment variable:
+**Cause**: App is listening on wrong port
 
+**Fix**: Use `APP_PORT` environment variable:
+```csharp
 var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
 app.Run($"http://*:{port}");
-3. "App does not have /health endpoint"
+```
+
+---
+
+### 3. "App does not have /health endpoint"
+
+```
 Error: App does not have /health endpoint - root responded after 1s (HTTP 404)
-Cause: Missing /health endpoint (only has /health/live and /health/ready)
+```
 
-Fix: Add [HttpGet] method to your HealthController:
+**Cause**: Missing `/health` endpoint (only has `/health/live` and `/health/ready`)
 
+**Fix**: Add `[HttpGet]` method to your HealthController:
+```csharp
 [HttpGet]
 public IActionResult Health()
 {
     return Ok(new { status = "Healthy", timestamp = DateTime.UtcNow });
 }
-4. "relation does not exist"
+```
+
+---
+
+### 4. "relation does not exist"
+
+```
 PostgresException: 42P01: relation "YourTable" does not exist
-Cause: Database migrations haven't been applied
+```
 
-Fix: Add startup migrations in Program.cs:
+**Cause**: Database migrations haven't been applied
 
+**Fix**: Add startup migrations in `Program.cs`:
+```csharp
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<YourDbContext>();
     db.Database.Migrate();
 }
-5. PostgreSQL service failed to start
+```
+
+---
+
+### 5. PostgreSQL service failed to start
+
+```
 Error: /bin/sh: 1: /usr/lib/postgresql/16/bin/initdb: not found
-Cause: PostgreSQL 16 not installed on deployment server
+```
 
-Fix: This is an infrastructure issue. Contact the AppDeployer team to install PostgreSQL 16:
+**Cause**: PostgreSQL 16 not installed on deployment server
 
+**Fix**: This is an infrastructure issue. Contact the AppDeployer team to install PostgreSQL 16:
+```bash
 sudo apt install postgresql-16
-6. "Commit not found" / Git sync issues
+```
+
+---
+
+### 6. "Commit not found" / Git sync issues
+
+```
 Error: Commit abc123 not found
-Cause: Git push didn't fully sync to server
+```
 
-Fix: Force push and redeploy:
+**Cause**: Git push didn't fully sync to server
 
+**Fix**: Force push and redeploy:
+```bash
 ad push --force -m "your message"
 ad deploy --latest -y -e pretest
-7. Migration command keeps running despite being removed
-Cause: Server caches old settings
+```
 
-Fix: Explicitly set empty string and update:
+---
 
+### 7. Migration command keeps running despite being removed
+
+**Cause**: Server caches old settings
+
+**Fix**: Explicitly set empty string and update:
+```json
 {
   "migrateCommand": ""
 }
+```
+```bash
 ad update
 ad deploy --latest -y -e pretest
-Environment URLs
-Environment	URL Pattern
-PreTest	your-app-pretest.rithm.services
-Test	your-app-test.rithm.services
-Production	your-app.rithmxo.org
-Auto-Injected Environment Variables
+```
+
+---
+
+## Environment URLs
+
+| Environment | URL Pattern |
+|-------------|-------------|
+| PreTest | `your-app-pretest.rithm.services` |
+| Test | `your-app-test.rithm.services` |
+| Production | `your-app.rithmxo.org` |
+
+---
+
+## Auto-Injected Environment Variables
+
 AppDeployer automatically provides these:
 
-Variable	Description
-APP_NAME	Application name
-APP_PORT	Port to listen on (required!)
-PGHOST	PostgreSQL host
-PGDATABASE	PostgreSQL database name
-ConnectionStrings__DefaultConnection	Full EF Core connection string
-Complete Working Example
-.ad.json
+| Variable | Description |
+|----------|-------------|
+| `APP_NAME` | Application name |
+| `APP_PORT` | Port to listen on (required!) |
+| `PGHOST` | PostgreSQL host |
+| `PGDATABASE` | PostgreSQL database name |
+| `ConnectionStrings__DefaultConnection` | Full EF Core connection string |
+
+---
+
+## Complete Working Example
+
+### .ad.json
+```json
 {
   "name": "my-api",
   "framework": "dotnet",
   "buildCommand": "dotnet publish src/MyApi/MyApi.csproj -c Release -o ./publish",
   "startCommand": "cd publish && ./MyApi"
 }
-Program.cs
+```
+
+### Program.cs
+```csharp
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
@@ -1573,7 +396,10 @@ app.MapControllers();
 // Use AppDeployer's assigned port
 var port = Environment.GetEnvironmentVariable("APP_PORT") ?? "5000";
 app.Run($"http://*:{port}");
-HealthController.cs
+```
+
+### HealthController.cs
+```csharp
 [ApiController]
 [Route("health")]
 public class HealthController : ControllerBase
@@ -1587,21 +413,26 @@ public class HealthController : ControllerBase
     [HttpGet("ready")]
     public IActionResult Ready() => Ok(new { status = "Healthy" });
 }
-Deployment Checklist
+```
+
+---
+
+## Deployment Checklist
+
 Before deploying, verify:
 
-[ ] .ad.json has correct path to .csproj in buildCommand
-[ ] startCommand matches your executable name
-[ ] Program.cs uses APP_PORT environment variable
-[ ] /health, /health/live, and /health/ready endpoints exist and return 200
-[ ] Database migrations run at startup (if using EF Core)
-[ ] All code is committed to git
-Then deploy:
+- [ ] `.ad.json` has correct path to `.csproj` in `buildCommand`
+- [ ] `startCommand` matches your executable name
+- [ ] `Program.cs` uses `APP_PORT` environment variable
+- [ ] `/health`, `/health/live`, and `/health/ready` endpoints exist and return 200
+- [ ] Database migrations run at startup (if using EF Core)
+- [ ] All code is committed to git
 
+Then deploy:
+```bash
 ad push -m "Your commit message"
 ad logs -e pretest  # Watch deployment progress
-
-
+```
 # Health Check System
 
 AppDeployer has a multi-layered health monitoring system that continuously monitors the platform itself, deployed applications, and infrastructure servers.
@@ -1803,246 +634,3 @@ The Admin Health tab receives these in real-time without requiring a page refres
 | Deployment health timeout | 10 seconds | Per-attempt HTTP timeout |
 | Server TCP check timeout | 2 seconds | Dashboard server connectivity |
 | Memory degraded threshold | 1024 MB | Hardcoded |
-
-
-AppDeployer
-Back
-Help
-Settings
-Sign Out
-Dashboard
-Help
-Quick Start
-CLI Tool
-Versioning
-Web Workflow
-Environment
-Troubleshooting
-Quick Start
-AppDeployer deploys .NET, Node.js, and Python apps with git push. Each app gets its own PostgreSQL database and runs as an isolated systemd service.
-
-Fastest Path (CLI)
-1.
-npm install -g https://appdeployer.rithmxo.org/downloads/appdeployer-cli.tgz⧉
-2.
-ad login⧉
-# Enter your email and password
-3.
-cd your-project⧉
-4.
-ad init && ad push⧉
-CLI Tool
-The CLI auto-detects your project type and configures deployment automatically.
-
-Commands
-ad login⧉
-Authenticate with email and password
-ad init [name]⧉
-Initialize app (detects framework)
-ad push⧉
-Push minor version to PreTest (prompts for message)
-ad push -m "msg"⧉
-Push minor version with inline message (no prompt)
-ad push a⧉
-Auto-push minor version with 'Updates' (no prompts)
-ad push m⧉
-Push milestone to PreTest (prompts for description)
-ad push ma⧉
-Auto-push milestone with 'Release' (no prompts)
-ad push --skip-deploy⧉
-Push code without triggering a deployment
-ad push --force⧉
-Force push (overwrite remote history)
-ad deploy [-e pretest|test|prod] [-v id]⧉
-Deploy version to an environment
-ad deploy --latest -y⧉
-Auto-deploy latest version without prompts
-ad pull⧉
-Sync latest code from remote (git fetch + merge)
-ad pull -v id⧉
-Download a specific version as a snapshot
-ad checkout [-v id]⧉
-Download a previous version
-ad status [name]⧉
-Check app status and metrics
-ad logs [name]⧉
-View deployment logs (-e pretest|test|prod, -n for lines)
-ad env list [name]⧉
-List environment variables (-e pretest|test|production)
-ad env set KEY=value⧉
-Set env var (-e pretest|test|production|all, -s for secret)
-ad env get KEY⧉
-Get environment variable value
-ad env unset KEY⧉
-Remove environment variable
-ad db tables [name]⧉
-List database tables (-e pretest|test|prod)
-ad db schema <table> [name]⧉
-Show schema for a table
-ad db query "SQL" [name]⧉
-Execute read-only SQL query (-n max rows)
-ad db connection [name]⧉
-Show database connection info
-ad update⧉
-Sync .ad.json settings to server
-ad analyze [-a]⧉
-Auto-generate tags and description
-ad upgrade⧉
-Upgrade CLI to latest version
-Examples
-ad init --name my-app --framework dotnet --yes⧉
-ad push⧉
-# Prompts for message, creates 10.1, 10.2, etc.
-ad push -m "Fix login bug"⧉
-# Inline message, no prompt
-ad push a⧉
-# Quick push with "Updates" message (no prompts)
-ad push m⧉
-# Prompts for description, creates Version 11, 12, etc.
-ad push ma⧉
-# Quick milestone with "Release" (no prompts)
-ad push a --skip-deploy⧉
-# Push code only, skip deployment to PreTest
-ad logs⧉
-# View last test deployment logs
-ad logs -e pretest⧉
-# View pretest deployment logs
-ad logs -e prod -n 200⧉
-# View last 200 lines from production
-ad env set API_KEY=secret123 -s⧉
-# Set secret env var for all environments
-ad env set KEY=val -e pretest⧉
-# Set for pretest only
-ad pull⧉
-# Sync latest commits from remote (preserves history)
-ad deploy -e prod -v <version-id>⧉
-ad analyze --apply⧉
-# Auto-apply suggestions
-ad deploy --latest -y -e prod⧉
-# Auto-deploy latest version to prod (no prompts)
-ad db tables⧉
-# List database tables
-ad db schema Users⧉
-# Show table schema
-ad db query "SELECT * FROM Users LIMIT 10"⧉
-# Run read-only SQL query
-ad db connection -e prod⧉
-# Show production connection info
-Note: ad pull syncs git history (like git pull). ad checkout overwrites local files with a snapshot. Commit changes before using either!
-Versioning System
-AppDeployer uses a dual versioning system with minor versions and major milestones.
-
-Minor Versions
-Use for regular commits and iterative changes:
-
-ad push⧉
-# Prompts: "What changed?" (default: Updates)
-ad push -m "Fix auth bug"⧉
-# Inline message, no prompt
-ad push a⧉
-# Auto: uses "Updates" without prompting
-Creates versions like 10.1 - Updates, 10.2 - Bug fix, 10.3 - Updates - shown in the Commits tab.
-
-Major Milestones
-Use for significant releases:
-
-ad push m⧉
-# Prompts: "Milestone description:" (default: Release)
-ad push ma⧉
-# Auto: uses "Release" without prompting
-Creates versions like Version 11, Version 12 - shown in the Versions tab.
-
-Push Without Deploying
-Push code to create a version without triggering a deployment to PreTest:
-
-ad push --skip-deploy⧉
-# Creates version, skips deployment
-ad push a --skip-deploy⧉
-# Auto push, no deployment
-The version is saved and can be deployed later with ad deploy.
-
-Example Workflow
-ad push a⧉
-# 10.1 - Updates (quick iteration)
-ad push⧉
-# 10.2 - Fixed authentication bug (custom message)
-ad push a⧉
-# 10.3 - Updates (quick iteration)
-ad push m⧉
-# Version 11 - New Dashboard (milestone)
-ad push a⧉
-# 11.1 - Updates (post-release fixes)
-Viewing Versions
-Versions Tab: Major milestones only (Version 1, Version 2, etc.)
-Commits Tab: All commits including minor versions (10.1, 10.2, 11, 11.1, etc.)
-Tip: Use ad push a for rapid iteration, ad push -m "msg" for a quick custom message, ad push for interactive, and ad push m for major releases.
-Push Safety Features
-Remote Sync Check (v1.0.14+)
-Before pushing, the CLI automatically checks if your local branch is up to date with the remote:
-
-What it checks:
-✓ Fetches latest remote state
-✓ Compares your local commits with remote
-✓ Blocks push if you're behind or diverged
-✓ Allows push if you're up to date or ahead
-Scenarios
-✓ Up to date or ahead: Push proceeds normally
-✗ Behind remote: Push blocked
-Error: "Your branch is 3 commits behind remote"
-Solution: Run ad pull first
-✗ Diverged: Push blocked
-Error: "Your branch has diverged from remote (2 ahead, 1 behind)"
-Solution: Run ad pull or use --force to overwrite
-Bypassing the Check
-Use --force to override the remote sync check and force push:
-
-ad push --force⧉
-# Overwrites remote (destructive!)
-Warning: --force will overwrite the remote branch and can cause data loss. Only use when you're certain you want to discard remote changes.
-Web Workflow
-1. Create an App
-Dashboard → New App. Enter a name and the CLI auto-detects build/start commands.
-
-2. Clone and Push
-git clone https://apps.rithmxo.org/git/your-app.git⧉
-cd your-app⧉
-# Add your code...
-git add . && git commit -m "Initial" && git push⧉
-Credentials: Your email and password
-
-3. Deploy to Production
-App detail page → Production card → Deploy Latest, or use the Versions tab to deploy a specific milestone.
-
-Version Management
-Every push creates a version. Use the app detail tabs:
-
-Versions Tab: View major milestones, deploy to Test or Production
-Commits Tab: View all commits (minor and major), deploy any commit
-Download any version as a zip file
-View commit messages and timestamps
-Environment & Database
-Auto-Injected Variables
-APP_NAME	Application name
-APP_PORT	Port to listen on
-PGHOST, PGDATABASE	PostgreSQL connection info
-ConnectionStrings__DefaultConnection	Full EF Core connection string
-Database
-Each app gets a dedicated PostgreSQL database. Use the injected connection string:
-
-builder.Configuration.GetConnectionString("DefaultConnection")⧉
-Domains
-PreTest: your-app-pretest.rithm.services
-Test: your-app-test.rithm.services
-Production: your-app.rithmxo.org
-Custom domains: App Settings tab
-
-Resource Limits
-Default: 512 MB memory, 100% CPU, 128 tasks max
-
-Troubleshooting
-App won't start	Check logs tab, verify health endpoints (/health, /health/ready, /health/live)
-Database fails	Use ConnectionStrings__DefaultConnection, don't hardcode
-Git push rejected	Verify your credentials are correct
-Wrong port	Listen on APP_PORT env var
-Server logs:
-journalctl -u your-app-test -f⧉
